@@ -63,12 +63,12 @@ def main():
     print(net)
 
     unsupported = False
-    unsupported &= net.ward.shape[0] > 0
-    unsupported &= net.xward.shape[0] > 0
-    unsupported &= net.dcline.shape[0] > 0
-    unsupported &= net.storage.shape[0] > 0
-    unsupported &= net.load.const_z_percent.sum() > 0
-    unsupported &= net.load.const_i_percent.sum() > 0
+    unsupported |= net.ward.shape[0] > 0
+    unsupported |= net.xward.shape[0] > 0
+    unsupported |= net.dcline.shape[0] > 0
+    unsupported |= net.storage.shape[0] > 0
+    unsupported |= net.load.const_z_percent.sum() > 0
+    unsupported |= net.load.const_i_percent.sum() > 0
     if unsupported:
         print('Unsupported elements exist in the network')
 
