@@ -69,6 +69,8 @@ def main():
     unsupported |= net.storage.shape[0] > 0
     unsupported |= net.load.const_z_percent.sum() > 0
     unsupported |= net.load.const_i_percent.sum() > 0
+    gen_buses = net.gen.bus.tolist() + net.ext_grid.bus.tolist()
+    unsupported |= len(gen_buses) != len(set(gen_buses))
     if unsupported:
         print('Unsupported elements exist in the network')
 
