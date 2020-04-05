@@ -98,6 +98,41 @@ def get_net():
     return net
 
 
+class Machine:
+
+    def __init__(self, vt0, s0, xdp, h, ra):
+
+        self.params = {
+            'xdp': xdp,
+            'h': h,
+            'ra': ra,
+            'pm': None,
+        }
+        self.states = {
+            'delta': [],
+            'omega': [],
+        }
+        self.signals = {
+            'vt': [],
+            'delta': [],
+            'omega': [],
+            'p': [],
+        }
+
+        ia0 = np.conj(s0/vt0)
+        theta0 = np.angle(vt0)
+        eq0 = vt0 + np.complex(0, self.params['xdp']) * ia0
+        delta0 = np.angle(eq0)
+        omega0 = 1
+
+        self.states['delta'] = delta0
+        self.states['omega'] = omega0
+
+        # Mechanical power.
+        self.params['pm'] = (1 / (self.params['xdp'] + 1j * self.params['ra'])) \
+            * np.abs(vt0) * np.abs(eq0) * np.sin(delta0 - theta0)
+
+
 def main():
 
     net = get_net()
@@ -110,25 +145,20 @@ def main():
     ybus += get_load_admittances(np.zeros_like(ybus), net)
 
     opt = {'t_sim': 2.0, 'fn': 60}
-    # Map from bus to machine parameters.
-    machs = {
+    # Map from bus to machine.
+    all_mach_params = {
         1: {'xdp': 0.0608, 'h': 23.64, 'ra': 0},
         2: {'xdp': 0.1198, 'h': 6.01, 'ra': 0},
         3: {'xdp': 0.1813, 'h': 3.01, 'ra': 0},
     }
+    machs = {
+        bus: Machine(get_v_at_bus(net, bus), get_gen_s_at_bus(net, bus),
+                     mach_params['xdp'], mach_params['h'], mach_params['ra'])
+        for bus, mach_params in all_mach_params.items()
+    }
 
-    for bus, params in machs.items():
-        vt0 = get_v_at_bus(net, bus)
-        s0 = get_gen_s_at_bus(net, bus)
-        ia0 = np.conj(s0/vt0)
-        theta0 = np.angle(vt0)
-        eq0 = vt0 + np.complex(0, params['xdp']) * ia0
-        delta0 = np.angle(eq0)
+    print()
 
-        p0 = (1 / (params['xdp'] + 1j * params['ra'])) \
-             * np.abs(vt0) * np.abs(eq0) * np.sin(delta0 - theta0)
-
-        print()
 
 
 if __name__ == '__main__':
