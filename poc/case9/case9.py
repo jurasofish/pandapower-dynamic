@@ -253,7 +253,7 @@ def main():
         init_xdot
     )
 
-    gen1_vt = solution.values.y[:, 2] + 1j * solution.values.y[:, 3]
+    gen1_vt = abs(solution.values.y[:, 2] + 1j * solution.values.y[:, 3])
     plt.plot(solution.values.t, gen1_vt)
     plt.show()
 
