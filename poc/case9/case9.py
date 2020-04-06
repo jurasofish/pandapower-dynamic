@@ -4,6 +4,8 @@ import pandapower as pp
 import pandapower.networks as nw
 from itertools import chain
 import pandas as pd
+from scikits.odes.dae import dae
+import matplotlib.pyplot as plt
 
 
 pd.set_option('display.max_columns', 500)
@@ -100,17 +102,16 @@ def get_net():
 
 class Machine:
 
-    def __init__(self, vt0, s0, xdp, h, ra):
+    def __init__(self, pp_bus, bus, fn, vt0, s0, xdp, h):
 
         self.params = {
+            'pp_bus': pp_bus,  # Index into pandapower bus dataframe.
+            'bus': bus,  # Index into ybus matrix and v index.
+            'fn': fn,  # Synchronous frequency (Hz).
             'xdp': xdp,
             'h': h,
-            'ra': ra,
             'pm': None,
-        }
-        self.states = {
-            'delta': [],
-            'omega': [],
+            'eq': None,
         }
         self.signals = {
             'vt': [],
@@ -125,12 +126,46 @@ class Machine:
         delta0 = np.angle(eq0)
         omega0 = 1
 
-        self.states['delta'] = delta0
-        self.states['omega'] = omega0
-
         # Mechanical power.
-        self.params['pm'] = (1 / (self.params['xdp'] + 1j * self.params['ra'])) \
+        self.params['pm'] = (1 / self.params['xdp']) \
             * np.abs(vt0) * np.abs(eq0) * np.sin(delta0 - theta0)
+
+        self.params['eq'] = np.abs(eq0)
+
+        self.init_state_vector = np.array([
+            omega0,  # differential
+            delta0,  # differential
+            vt0.real,  # algebraic
+            vt0.imag,  # algebraic
+        ])
+
+    def get_i(self, t, x, xdot):
+        """ x is the same x as used in the DAE residual function. """
+        delta = x[1]
+        i_grid = self.params['eq'] * np.exp(1j * delta) / np.complex(0, self.params['xdp'])
+        return i_grid
+
+    def residual(self, t, x, xdot, vt_calc):
+        omega = x[0]
+        omegadot = xdot[0]
+        delta = x[1]
+        deltadot = xdot[1]
+        vt = x[2] + 1j*x[3]
+
+        p = np.abs(vt) * self.params['eq'] * np.sin(delta - np.angle(vt)) / self.params['xdp']
+
+        omegadot_calc = 1/(2*self.params['h']) * (self.params['pm'] - p)
+
+        deltadot_calc = 2 * np.pi * self.params['fn'] * (omega - 1)
+
+        resid = np.abs(np.array([
+            omegadot_calc - omegadot,  # omega
+            deltadot_calc - deltadot,  # delta
+            vt_calc.real - vt.real,  # v real
+            vt_calc.imag - vt.imag,  # v imag
+        ]))
+
+        return resid
 
 
 def main():
@@ -139,26 +174,88 @@ def main():
     print(net)
     check_unsupported(net)
 
-
     pp.runpp(net)
     ybus = np.array(net._ppc["internal"]["Ybus"].todense())
     ybus += get_load_admittances(np.zeros_like(ybus), net)
 
     opt = {'t_sim': 2.0, 'fn': 60}
-    # Map from bus to machine.
+    # Map from pp_bus to machine.
     all_mach_params = {
-        1: {'xdp': 0.0608, 'h': 23.64, 'ra': 0},
-        2: {'xdp': 0.1198, 'h': 6.01, 'ra': 0},
-        3: {'xdp': 0.1813, 'h': 3.01, 'ra': 0},
-    }
-    machs = {
-        bus: Machine(get_v_at_bus(net, bus), get_gen_s_at_bus(net, bus),
-                     mach_params['xdp'], mach_params['h'], mach_params['ra'])
-        for bus, mach_params in all_mach_params.items()
+        1: {'xdp': 0.0608, 'h': 23.64},
+        2: {'xdp': 0.1198, 'h': 6.01},
+        3: {'xdp': 0.1813, 'h': 3.01},
     }
 
-    print()
+    machs = [
+        Machine(
+            pp_bus=pp_bus,
+            bus=net._pd2ppc_lookups["bus"][pp_bus],
+            fn=opt['fn'],
+            vt0=get_v_at_bus(net, pp_bus),
+            s0=get_gen_s_at_bus(net, pp_bus),
+            xdp=mach_params['xdp'],
+            h=mach_params['h'],
+        )
+        for pp_bus, mach_params in all_mach_params.items()
+    ]
 
+    # Need to properly understand current injection equations.
+    for mach in machs:
+        bus = mach.params['bus']
+        ybus[bus, bus] += 1/(1j * mach.params['xdp'])
+    ybus_inv = np.linalg.inv(ybus)
+
+    # Define function here so it has access to outer scope variables.
+    def residual(t, x, xdot, result):
+        """ Aggregate machine residual functions. """
+
+        # Calculate bus voltages.
+        currents = np.zeros(ybus.shape[0], dtype=ybus.dtype)
+        for i, mach in enumerate(machs):  # Assume ordered dict.
+            x_sub = x[4*i:4*i+4]
+            xdot_sub = xdot[4*i:4*i+4]
+            mach_i = mach.get_i(t, x_sub, xdot_sub)
+            bus = mach.params['bus']
+            currents[bus] += mach_i
+        v_calc = np.squeeze(ybus_inv @ currents)
+        _ = net  # Grab reference to net from outer scope to assist debugging.
+        # print(abs(np.squeeze(np.array(net._ppc["internal"]["V"])) - v_calc).max())
+        # print()
+
+        # Now, get residuals
+        for i, mach in enumerate(machs):  # Assume ordered dict.
+            bus = mach.params['bus']
+            vt_calc = v_calc[bus]
+            x_sub = x[4*i:4*i+4]
+            xdot_sub = xdot[4*i:4*i+4]
+            resid = mach.residual(t, x_sub, xdot_sub, vt_calc)
+
+            result[4*i:4*i+4] = resid[:]
+
+    init_x = np.abs(np.concatenate([mach.init_state_vector for mach in machs]))
+    init_xdot = np.zeros_like(init_x)
+    init_xdot[2] = 0
+
+    solver = dae(
+        'ida',
+        residual,
+        # compute_initcond='yp0',
+        first_step_size=1e-18,
+        atol=1e-4,
+        rtol=1e-4,
+        algebraic_vars_idx=[2, 3, 6, 7, 10, 11],
+        old_api=False
+    )
+
+    solution = solver.solve(
+        np.linspace(0, 2, 1000),
+        init_x,
+        init_xdot
+    )
+
+    gen1_vt = solution.values.y[:, 2] + 1j * solution.values.y[:, 3]
+    plt.plot(solution.values.t, gen1_vt)
+    plt.show()
 
 
 if __name__ == '__main__':
