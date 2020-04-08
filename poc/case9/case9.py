@@ -236,6 +236,10 @@ def main():
     init_xdot = np.zeros_like(init_x)
     init_xdot[2] = 0
 
+    a = np.zeros_like(init_x)
+    residual(0, init_x, init_xdot, a)
+    print(a, '\n', np.sum(np.abs(a)))  # should be about zero.
+
     solver = dae(
         'ida',
         residual,
