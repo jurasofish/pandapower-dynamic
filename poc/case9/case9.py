@@ -175,8 +175,8 @@ def main():
     check_unsupported(net)
 
     pp.runpp(net)
-    ybus = np.array(net._ppc["internal"]["Ybus"].todense())
-    ybus += get_load_admittances(np.zeros_like(ybus), net)
+    ybus_og = np.array(net._ppc["internal"]["Ybus"].todense())
+    ybus_og += get_load_admittances(np.zeros_like(ybus_og), net)
 
     opt = {'t_sim': 2.0, 'fn': 60}
     # Map from pp_bus to machine.
@@ -202,45 +202,39 @@ def main():
     # Need to properly understand current injection equations.
     for mach in machs:
         bus = mach.params['bus']
-        ybus[bus, bus] += 1/(1j * mach.params['xdp'])
+        ybus_og[bus, bus] += 1/(1j * mach.params['xdp'])
 
-    ybus_1 = ybus.copy()
-    ybus_2 = ybus.copy()
+    ybus_1 = ybus_og.copy()
+
+    ybus_2 = np.zeros_like(ybus_og)
     ybus_2[7, 7] += 1e4 - 1j * 1e4
-    ybus_3 = ybus_1
 
-    ybus_inv_1 = np.linalg.inv(ybus_1)
-    ybus_inv_2 = np.linalg.inv(ybus_2)
-    ybus_inv_3 = np.linalg.inv(ybus_3)
+    ybus_3 = ybus_2 * -1
 
     # Define function here so it has access to outer scope variables.
     def residual(t, x, xdot, result):
         """ Aggregate machine residual functions. """
 
-        print(t)
+        print(f't={t}')
         # Calculate bus voltages.
-        currents = np.zeros(ybus.shape[0], dtype=ybus.dtype)
+        currents = np.zeros(ybus_og.shape[0], dtype=ybus_og.dtype)
         for i, mach in enumerate(machs):  # Assume ordered dict.
             x_sub = x[4*i:4*i+4]
             xdot_sub = xdot[4*i:4*i+4]
             mach_i = mach.get_i(t, x_sub, xdot_sub)
             bus = mach.params['bus']
             currents[bus] += mach_i
-        ybus_inv = None
-        if t < 0.1:
-            ybus_inv = ybus_inv_1
-        if 0.1 <= t < 0.183:
-            ybus_inv = ybus_inv_2
-            # print('fault')
-        if t >= 0.183:
-            ybus_inv = ybus_inv_3
-        # ybus_inv = ybus_inv_1
-        v_calc = np.squeeze(ybus_inv @ currents)
-        # if abs(v_calc[0]) < 1:
-        #     print(v_calc)
-        _ = net  # Grab reference to net from outer scope to assist debugging.
-        # print(abs(np.squeeze(np.array(net._ppc["internal"]["V"])) - v_calc).max())
-        # print()
+
+        d = 1e-5
+        ybus = ybus_1
+        ybus = ybus + 1/(1 + np.exp(np.clip(-(t-0.100)/d, -50, 50))) * ybus_2
+        ybus = ybus + 1/(1 + np.exp(np.clip(-(t-0.120)/d, -50, 50))) * ybus_3
+
+        # print(np.abs(ybus_og - ybus).sum())
+        print(np.abs(ybus).sum())
+        print(ybus[7, 7] - ybus_og[7, 7])
+
+        v_calc = np.squeeze(np.linalg.solve(ybus, currents))
 
         # Now, get residuals
         for i, mach in enumerate(machs):  # Assume ordered dict.
@@ -251,10 +245,10 @@ def main():
             resid = mach.residual(t, x_sub, xdot_sub, vt_calc)
 
             result[4*i:4*i+4] = resid[:]
+        # print(np.sum(np.abs(result)))
 
     init_x = np.abs(np.concatenate([mach.init_state_vector for mach in machs]))
     init_xdot = np.zeros_like(init_x)
-    init_xdot[2] = 0
 
     a = np.zeros_like(init_x)
     residual(0, init_x, init_xdot, a)
