@@ -234,7 +234,6 @@ def main():
 
     init_x = np.abs(np.concatenate([mach.init_state_vector for mach in machs]))
     init_xdot = np.zeros_like(init_x)
-    init_xdot[2] = 0
 
     a = np.zeros_like(init_x)
     residual(0, init_x, init_xdot, a)
