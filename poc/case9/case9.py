@@ -254,6 +254,8 @@ def main():
     )
 
     gen1_vt = abs(solution.values.y[:, 2] + 1j * solution.values.y[:, 3])
+    # gen1_vt = abs(solution[2][:, 2] + 1j * solution[2][:, 3])  # for ddaspk
+    # plt.plot(solution[1], gen1_vt)  # for ddaspk
     plt.plot(solution.values.t, gen1_vt)
     plt.show()
 
