@@ -203,12 +203,21 @@ def main():
     for mach in machs:
         bus = mach.params['bus']
         ybus[bus, bus] += 1/(1j * mach.params['xdp'])
-    ybus_inv = np.linalg.inv(ybus)
+
+    ybus_1 = ybus.copy()
+    ybus_2 = ybus.copy()
+    ybus_2[7, 7] += 1e4 - 1j * 1e4
+    ybus_3 = ybus_1
+
+    ybus_inv_1 = np.linalg.inv(ybus_1)
+    ybus_inv_2 = np.linalg.inv(ybus_2)
+    ybus_inv_3 = np.linalg.inv(ybus_3)
 
     # Define function here so it has access to outer scope variables.
     def residual(t, x, xdot, result):
         """ Aggregate machine residual functions. """
 
+        print(t)
         # Calculate bus voltages.
         currents = np.zeros(ybus.shape[0], dtype=ybus.dtype)
         for i, mach in enumerate(machs):  # Assume ordered dict.
@@ -217,7 +226,18 @@ def main():
             mach_i = mach.get_i(t, x_sub, xdot_sub)
             bus = mach.params['bus']
             currents[bus] += mach_i
+        ybus_inv = None
+        if t < 0.1:
+            ybus_inv = ybus_inv_1
+        if 0.1 <= t < 0.183:
+            ybus_inv = ybus_inv_2
+            # print('fault')
+        if t >= 0.183:
+            ybus_inv = ybus_inv_3
+        # ybus_inv = ybus_inv_1
         v_calc = np.squeeze(ybus_inv @ currents)
+        # if abs(v_calc[0]) < 1:
+        #     print(v_calc)
         _ = net  # Grab reference to net from outer scope to assist debugging.
         # print(abs(np.squeeze(np.array(net._ppc["internal"]["V"])) - v_calc).max())
         # print()
@@ -245,16 +265,16 @@ def main():
         residual,
         # compute_initcond='yp0',
         first_step_size=1e-18,
-        atol=1e-4,
-        rtol=1e-4,
+        atol=1e-2,
+        rtol=1e-2,
         algebraic_vars_idx=[2, 3, 6, 7, 10, 11],
         old_api=False,
-        max_steps=5000,
-        max_step_size=0.1,
+        max_steps=500000,
+        max_step_size=0.01,
     )
 
     solution = solver.solve(
-        np.linspace(0, 2, 1000),
+        np.linspace(0, 0.5, 1000),
         init_x,
         init_xdot
     )
