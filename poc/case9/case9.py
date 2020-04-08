@@ -248,7 +248,9 @@ def main():
         atol=1e-4,
         rtol=1e-4,
         algebraic_vars_idx=[2, 3, 6, 7, 10, 11],
-        old_api=False
+        old_api=False,
+        max_steps=5000,
+        max_step_size=0.1,
     )
 
     solution = solver.solve(
