@@ -237,7 +237,7 @@ def main():
 
             result[2*i:2*i+2] = resid[:]
 
-    init_x = np.abs(np.concatenate([mach.init_state_vector for mach in machs]))
+    init_x = np.concatenate([mach.init_state_vector for mach in machs])
     init_xdot = np.zeros_like(init_x)
 
     a = np.zeros_like(init_x)
