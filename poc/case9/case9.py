@@ -199,11 +199,17 @@ def main():
         for pp_bus, mach_params in all_mach_params.items()
     ]
 
+    if [mach.params['bus'] for mach in machs] != [0, 1, 2]:
+        raise ValueError
+
     # Need to properly understand current injection equations.
     for mach in machs:
         bus = mach.params['bus']
         ybus[bus, bus] += 1/(1j * mach.params['xdp'])
     ybus_inv = np.linalg.inv(ybus)
+
+    resid_t = []
+    resid_vals = []
 
     # Define function here so it has access to outer scope variables.
     def residual(t, x, xdot, result):
@@ -232,6 +238,15 @@ def main():
 
             result[4*i:4*i+4] = resid[:]
 
+        abs_resid = np.sum(np.abs(result))
+        if t > 1e-3:
+            resid_t.append(t)
+            resid_vals.append(abs_resid)
+
+        if abs(t - 0.32728) < 1e-3:
+            print(result)
+            print(abs_resid)
+
     init_x = np.abs(np.concatenate([mach.init_state_vector for mach in machs]))
     init_xdot = np.zeros_like(init_x)
 
@@ -258,10 +273,23 @@ def main():
         init_xdot
     )
 
-    gen1_vt = abs(solution.values.y[:, 2] + 1j * solution.values.y[:, 3])
-    # gen1_vt = abs(solution[2][:, 2] + 1j * solution[2][:, 3])  # for ddaspk
-    # plt.plot(solution[1], gen1_vt)  # for ddaspk
-    plt.plot(solution.values.t, gen1_vt)
+    # gen1_vt = abs(solution.values.y[:, 2] + 1j * solution.values.y[:, 3])
+    # gen2_vt = abs(solution.values.y[:, 6] + 1j * solution.values.y[:, 7])
+    gen3_vt = abs(solution.values.y[:, 10] + 1j * solution.values.y[:, 11])
+    # plt.plot(solution.values.t[-30:], gen1_vt[-30:])
+    # plt.plot(solution.values.t, gen1_vt)
+    # plt.plot(solution.values.t, gen2_vt)
+    plt.plot(solution.values.t, gen3_vt)
+
+    plt.figure()
+    plt.plot(solution.values.t, solution.values.y[:, 0])
+
+    plt.figure()
+    plt.plot(solution.values.t, solution.values.y[:, 1])
+
+    plt.figure()
+    plt.scatter(resid_t, resid_vals)
+
     plt.show()
 
 

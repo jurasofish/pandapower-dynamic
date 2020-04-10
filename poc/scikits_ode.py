@@ -17,6 +17,8 @@ lambdaval = 0.1
 z0  = [x0, y0, 0., 0., lambdaval]
 zp0 = [0., 0., lambdaval*x0/m, lambdaval*y0/m-g, -g]
 
+resid_t = []
+resid_vals = []
 
 def residual(t, x, xdot, result):
     """ we create the residual equations for the problem"""
@@ -26,6 +28,12 @@ def residual(t, x, xdot, result):
     result[3] = -xdot[3]+x[4]*x[1]/m-g
     result[4] = x[2]**2 + x[3]**2 \
                     + (x[0]**2 + x[1]**2)/m*x[4] - x[1] * g
+
+    abs_resid = np.sum(np.abs(result))
+    if t > 2.1:
+        resid_t.append(t)
+        resid_vals.append(abs_resid)
+
 
 solver = dae('ida', residual,
              compute_initcond='yp0',
@@ -65,6 +73,9 @@ print('----------------------')
 for t, u in zip(solution.values.t, solution.values.y):
     print('{0:>4.0f} {1:15.6g} '.format(t, u[0]))
 
+
+plt.scatter(resid_t, resid_vals)
+plt.show()
 
 
 #plot of the oscilator
