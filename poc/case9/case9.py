@@ -135,8 +135,6 @@ class Machine:
         self.init_state_vector = np.array([
             omega0,  # differential
             delta0,  # differential
-            vt0.real,  # algebraic
-            vt0.imag,  # algebraic
         ])
 
     def get_i(self, t, x, xdot):
@@ -145,12 +143,11 @@ class Machine:
         i_grid = self.params['eq'] * np.exp(1j * delta) / np.complex(0, self.params['xdp'])
         return i_grid
 
-    def residual(self, t, x, xdot, vt_calc):
+    def residual(self, t, x, xdot, vt):
         omega = x[0]
         omegadot = xdot[0]
         delta = x[1]
         deltadot = xdot[1]
-        vt = x[2] + 1j*x[3]
 
         p = np.abs(vt) * self.params['eq'] * np.sin(delta - np.angle(vt)) / self.params['xdp']
 
@@ -161,8 +158,6 @@ class Machine:
         resid = np.abs(np.array([
             omegadot_calc - omegadot,  # omega
             deltadot_calc - deltadot,  # delta
-            vt_calc.real - vt.real,  # v real
-            vt_calc.imag - vt.imag,  # v imag
         ]))
 
         return resid
@@ -219,20 +214,16 @@ def main():
         # Calculate bus voltages.
         currents = np.zeros(ybus_og.shape[0], dtype=ybus_og.dtype)
         for i, mach in enumerate(machs):  # Assume ordered dict.
-            x_sub = x[4*i:4*i+4]
-            xdot_sub = xdot[4*i:4*i+4]
+            x_sub = x[2*i:2*i+2]
+            xdot_sub = xdot[2*i:2*i+2]
             mach_i = mach.get_i(t, x_sub, xdot_sub)
             bus = mach.params['bus']
             currents[bus] += mach_i
 
         d = 1e-5
         ybus = ybus_1
-        ybus = ybus + 1/(1 + np.exp(np.clip(-(t-0.100)/d, -50, 50))) * ybus_2
-        ybus = ybus + 1/(1 + np.exp(np.clip(-(t-0.120)/d, -50, 50))) * ybus_3
-
-        # print(np.abs(ybus_og - ybus).sum())
-        print(np.abs(ybus).sum())
-        print(ybus[7, 7] - ybus_og[7, 7])
+        ybus = ybus + 1/(1 + np.exp(np.clip(-(t-1)/d, -50, 50))) * ybus_2
+        ybus = ybus + 1/(1 + np.exp(np.clip(-(t-1.083)/d, -50, 50))) * ybus_3
 
         v_calc = np.squeeze(np.linalg.solve(ybus, currents))
 
@@ -240,12 +231,11 @@ def main():
         for i, mach in enumerate(machs):  # Assume ordered dict.
             bus = mach.params['bus']
             vt_calc = v_calc[bus]
-            x_sub = x[4*i:4*i+4]
-            xdot_sub = xdot[4*i:4*i+4]
+            x_sub = x[2*i:2*i+2]
+            xdot_sub = xdot[2*i:2*i+2]
             resid = mach.residual(t, x_sub, xdot_sub, vt_calc)
 
-            result[4*i:4*i+4] = resid[:]
-        # print(np.sum(np.abs(result)))
+            result[2*i:2*i+2] = resid[:]
 
     init_x = np.abs(np.concatenate([mach.init_state_vector for mach in machs]))
     init_xdot = np.zeros_like(init_x)
@@ -259,27 +249,34 @@ def main():
         residual,
         # compute_initcond='yp0',
         first_step_size=1e-18,
-        atol=1e-2,
-        rtol=1e-2,
-        algebraic_vars_idx=[2, 3, 6, 7, 10, 11],
+        atol=1e-4,
+        rtol=1e-4,
+        # algebraic_vars_idx=[2, 3, 6, 7, 10, 11],
         old_api=False,
         max_steps=500000,
-        max_step_size=0.01,
+        max_step_size=1e-1,
     )
 
     solution = solver.solve(
-        np.linspace(0, 0.5, 1000),
+        np.linspace(0, 2, 1000),
         init_x,
         init_xdot
     )
 
-    gen1_vt = abs(solution.values.y[:, 2] + 1j * solution.values.y[:, 3])
-    gen2_vt = abs(solution.values.y[:, 6] + 1j * solution.values.y[:, 7])
-    gen3_vt = abs(solution.values.y[:, 10] + 1j * solution.values.y[:, 11])
+    # gen1_vt = abs(solution.values.y[:, 2] + 1j * solution.values.y[:, 3])
+    # gen2_vt = abs(solution.values.y[:, 6] + 1j * solution.values.y[:, 7])
+    # gen3_vt = abs(solution.values.y[:, 10] + 1j * solution.values.y[:, 11])
     # plt.plot(solution.values.t[-30:], gen1_vt[-30:])
-    plt.plot(solution.values.t, gen1_vt)
+    # plt.plot(solution.values.t, gen1_vt)
     # plt.plot(solution.values.t, gen2_vt)
     # plt.plot(solution.values.t, gen3_vt)
+
+    plt.figure()
+    plt.plot(solution.values.t, solution.values.y[:, 0])
+
+    plt.figure()
+    plt.plot(solution.values.t, solution.values.y[:, 1])
+
     plt.show()
 
 
