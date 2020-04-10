@@ -226,18 +226,23 @@ def main():
         ybus = ybus + 1/(1 + np.exp(np.clip(-(t-1.083)/d, -50, 50))) * ybus_3
 
         v_calc = np.squeeze(np.linalg.solve(ybus, currents))
+        result[6:6+9] = v_calc.real - x[6:6+9]
+        result[6+9:] = v_calc.imag - x[6+9:]
 
         # Now, get residuals
         for i, mach in enumerate(machs):  # Assume ordered dict.
             bus = mach.params['bus']
-            vt_calc = v_calc[bus]
+            vt_given = x[6+bus] + 1j * x[6+9+bus]  # Given by solver
             x_sub = x[2*i:2*i+2]
             xdot_sub = xdot[2*i:2*i+2]
-            resid = mach.residual(t, x_sub, xdot_sub, vt_calc)
+            resid = mach.residual(t, x_sub, xdot_sub, vt_given)
 
             result[2*i:2*i+2] = resid[:]
 
     init_x = np.concatenate([mach.init_state_vector for mach in machs])
+    init_x = np.concatenate([init_x,
+                             np.squeeze(np.array(net._ppc["internal"]["V"])).real,
+                             np.squeeze(np.array(net._ppc["internal"]["V"])).imag])
     init_xdot = np.zeros_like(init_x)
 
     a = np.zeros_like(init_x)
@@ -249,12 +254,12 @@ def main():
         residual,
         # compute_initcond='yp0',
         first_step_size=1e-18,
-        atol=1e-4,
-        rtol=1e-4,
-        # algebraic_vars_idx=[2, 3, 6, 7, 10, 11],
+        atol=1e-6,
+        rtol=1e-6,
+        algebraic_vars_idx=list(range(6, 6+9*2)),
         old_api=False,
         max_steps=500000,
-        max_step_size=1e-1,
+        max_step_size=1e-3,
     )
 
     solution = solver.solve(
