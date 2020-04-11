@@ -155,7 +155,7 @@ class Machine:
 
         p = np.abs(vt) * self.params['eq'] * np.sin(delta - np.angle(vt)) / self.params['xdp']
 
-        omegadot_calc = 1/(2*self.params['h']) * (self.params['pm'] - p)
+        omegadot_calc = 1/(2*self.params['h']) * (self.params['pm']/omega - p)
 
         deltadot_calc = 2 * np.pi * self.params['fn'] * (omega - 1)
 
