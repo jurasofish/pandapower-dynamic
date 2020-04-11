@@ -8,7 +8,7 @@ from scikits.odes.dae import dae
 import matplotlib.pyplot as plt
 from cachetools import cached, LRUCache
 from cachetools.keys import hashkey
-from threadpoolctl import threadpool_limits
+import time
 
 
 residual_counter = 0
@@ -175,8 +175,7 @@ def get_ybus_inv(t, ybus_og, ybus_states, d=1e-5):
         factor = 1 / (1 + np.exp(np.clip(-(t - event_t) / d, -50, 50)))
         ybus = ybus + factor * event_ybus  # don't use in-place += as it mutates.
 
-    with threadpool_limits(limits=1):  # Limit to one thread.
-        ybus_inv = np.linalg.inv(ybus)
+    ybus_inv = np.linalg.inv(ybus)
     return ybus_inv
 
 
