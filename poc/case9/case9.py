@@ -292,13 +292,13 @@ def main():
         init_xdot
     )
 
-    # gen1_vt = abs(solution.values.y[:, 2] + 1j * solution.values.y[:, 3])
-    # gen2_vt = abs(solution.values.y[:, 6] + 1j * solution.values.y[:, 7])
-    # gen3_vt = abs(solution.values.y[:, 10] + 1j * solution.values.y[:, 11])
+    gen1_vt = abs(solution.values.y[:, 6+0] + 1j * solution.values.y[:, 6+9+0])
+    gen2_vt = abs(solution.values.y[:, 6+1] + 1j * solution.values.y[:, 6+9+1])
+    gen3_vt = abs(solution.values.y[:, 6+2] + 1j * solution.values.y[:, 6+9+2])
     # plt.plot(solution.values.t[-30:], gen1_vt[-30:])
-    # plt.plot(solution.values.t, gen1_vt)
-    # plt.plot(solution.values.t, gen2_vt)
-    # plt.plot(solution.values.t, gen3_vt)
+    plt.plot(solution.values.t, gen1_vt)
+    plt.plot(solution.values.t, gen2_vt)
+    plt.plot(solution.values.t, gen3_vt)
 
     plt.figure()
     plt.plot(solution.values.t, solution.values.y[:, 0])
