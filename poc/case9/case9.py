@@ -179,12 +179,14 @@ def get_ybus_inv(t, ybus_og, ybus_states, d=1e-5):
     return ybus_inv
 
 
+# @profile
 def residual(t, x, xdot, result, machs, ybus_og, ybus_states):
     """ Aggregate machine residual functions. """
+    t1 = time.perf_counter()
 
     global residual_counter
     residual_counter += 1
-    print(residual_counter)
+    # print(residual_counter)
     print(f't={t}')
 
     # Calculate bus voltages.
@@ -196,7 +198,9 @@ def residual(t, x, xdot, result, machs, ybus_og, ybus_states):
         bus = mach.params['bus']
         currents[bus] += mach_i
 
+    t_inv = time.perf_counter()
     ybus_inv = get_ybus_inv(t, ybus_og, ybus_states)
+    # print(f'Inverse in {(time.perf_counter() - t_inv) * 1e6:.2f} us')
     v_calc = np.squeeze(ybus_inv @ currents)
     result[6:6+9] = v_calc.real - x[6:6+9]
     result[6+9:] = v_calc.imag - x[6+9:]
@@ -210,6 +214,7 @@ def residual(t, x, xdot, result, machs, ybus_og, ybus_states):
         resid = mach.residual(t, x_sub, xdot_sub, vt_given)
 
         result[2*i:2*i+2] = resid[:]
+    # print(f'Residual in {(time.perf_counter() - t1)*1e6:.2f} us')
 
 
 def main():
