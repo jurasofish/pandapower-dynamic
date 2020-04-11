@@ -6,6 +6,9 @@ from itertools import chain
 import pandas as pd
 from scikits.odes.dae import dae
 import matplotlib.pyplot as plt
+from cachetools import cached, LRUCache
+from cachetools.keys import hashkey
+from threadpoolctl import threadpool_limits
 
 
 pd.set_option('display.max_columns', 500)
@@ -163,6 +166,19 @@ class Machine:
         return resid
 
 
+# https://stackoverflow.com/a/32655449/8899565
+@cached(cache=LRUCache(maxsize=128), key=lambda t, *args, **kwargs: hashkey(t))
+def get_ybus_inv(t, ybus_og, ybus_states, d=1e-5):
+    ybus = ybus_og
+    for event_t, event_ybus in ybus_states:
+        factor = 1 / (1 + np.exp(np.clip(-(t - event_t) / d, -50, 50)))
+        ybus = ybus + factor * event_ybus  # don't use in-place += as it mutates.
+
+    with threadpool_limits(limits=1):  # Limit to one thread.
+        ybus_inv = np.linalg.inv(ybus)
+    return ybus_inv
+
+
 def main():
 
     net = get_net()
@@ -206,11 +222,19 @@ def main():
 
     ybus_3 = ybus_2 * -1
 
+    ybus_states = [(1.0, ybus_2), (1.083, ybus_3)]
+
+    residual_counter = 0
+
     # Define function here so it has access to outer scope variables.
     def residual(t, x, xdot, result):
         """ Aggregate machine residual functions. """
 
+        nonlocal residual_counter
+        residual_counter += 1
+        print(residual_counter)
         print(f't={t}')
+
         # Calculate bus voltages.
         currents = np.zeros(ybus_og.shape[0], dtype=ybus_og.dtype)
         for i, mach in enumerate(machs):  # Assume ordered dict.
@@ -220,12 +244,8 @@ def main():
             bus = mach.params['bus']
             currents[bus] += mach_i
 
-        d = 1e-5
-        ybus = ybus_1
-        ybus = ybus + 1/(1 + np.exp(np.clip(-(t-1)/d, -50, 50))) * ybus_2
-        ybus = ybus + 1/(1 + np.exp(np.clip(-(t-1.083)/d, -50, 50))) * ybus_3
-
-        v_calc = np.squeeze(np.linalg.solve(ybus, currents))
+        ybus_inv = get_ybus_inv(t, ybus_og, ybus_states)
+        v_calc = np.squeeze(ybus_inv @ currents)
         result[6:6+9] = v_calc.real - x[6:6+9]
         result[6+9:] = v_calc.imag - x[6+9:]
 
