@@ -141,17 +141,15 @@ class Machine:
             delta0,  # differential
         ])
 
-    def get_i(self, t, x, xdot):
+    def get_i(self, t, x):
         """ x is the same x as used in the DAE residual function. """
         delta = x[1]
         i_grid = self.params['eq'] * np.exp(1j * delta) / np.complex(0, self.params['xdp'])
         return i_grid
 
-    def residual(self, t, x, xdot, vt):
+    def calc_diff(self, t, x, vt):
         omega = x[0]
-        omegadot = xdot[0]
         delta = x[1]
-        deltadot = xdot[1]
 
         p = np.abs(vt) * self.params['eq'] * np.sin(delta - np.angle(vt)) / self.params['xdp']
 
@@ -159,12 +157,12 @@ class Machine:
 
         deltadot_calc = 2 * np.pi * self.params['fn'] * (omega - 1)
 
-        resid = np.array([
-            omegadot_calc - omegadot,  # omega
-            deltadot_calc - deltadot,  # delta
+        diff = np.array([
+            omegadot_calc,
+            deltadot_calc,
         ])
 
-        return resid
+        return diff
 
 
 # https://stackoverflow.com/a/32655449/8899565
@@ -193,8 +191,7 @@ def residual(t, x, xdot, result, machs, ybus_og, ybus_states):
     currents = np.zeros(ybus_og.shape[0], dtype=ybus_og.dtype)
     for i, mach in enumerate(machs):  # Assume ordered dict.
         x_sub = x[2*i:2*i+2]
-        xdot_sub = xdot[2*i:2*i+2]
-        mach_i = mach.get_i(t, x_sub, xdot_sub)
+        mach_i = mach.get_i(t, x_sub)
         bus = mach.params['bus']
         currents[bus] += mach_i
 
@@ -211,9 +208,9 @@ def residual(t, x, xdot, result, machs, ybus_og, ybus_states):
         vt_given = np.complex(x[6+bus], x[6+9+bus])  # Given by solver
         x_sub = x[2*i:2*i+2]
         xdot_sub = xdot[2*i:2*i+2]
-        resid = mach.residual(t, x_sub, xdot_sub, vt_given)
+        diff_values = mach.calc_diff(t, x_sub, vt_given)
 
-        result[2*i:2*i+2] = resid[:]
+        result[2*i:2*i+2] = (diff_values - xdot_sub).copy()[:]
     # print(f'Residual in {(time.perf_counter() - t1)*1e6:.2f} us')
 
 
