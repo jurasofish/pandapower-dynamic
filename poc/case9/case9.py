@@ -11,6 +11,7 @@ from cachetools.keys import hashkey
 from threadpoolctl import threadpool_limits
 
 
+residual_counter = 0
 pd.set_option('display.max_columns', 500)
 pd.set_option('display.width', 1000)
 
@@ -179,6 +180,39 @@ def get_ybus_inv(t, ybus_og, ybus_states, d=1e-5):
     return ybus_inv
 
 
+def residual(t, x, xdot, result, machs, ybus_og, ybus_states):
+    """ Aggregate machine residual functions. """
+
+    global residual_counter
+    residual_counter += 1
+    print(residual_counter)
+    print(f't={t}')
+
+    # Calculate bus voltages.
+    currents = np.zeros(ybus_og.shape[0], dtype=ybus_og.dtype)
+    for i, mach in enumerate(machs):  # Assume ordered dict.
+        x_sub = x[2*i:2*i+2]
+        xdot_sub = xdot[2*i:2*i+2]
+        mach_i = mach.get_i(t, x_sub, xdot_sub)
+        bus = mach.params['bus']
+        currents[bus] += mach_i
+
+    ybus_inv = get_ybus_inv(t, ybus_og, ybus_states)
+    v_calc = np.squeeze(ybus_inv @ currents)
+    result[6:6+9] = v_calc.real - x[6:6+9]
+    result[6+9:] = v_calc.imag - x[6+9:]
+
+    # Now, get residuals
+    for i, mach in enumerate(machs):  # Assume ordered dict.
+        bus = mach.params['bus']
+        vt_given = x[6+bus] + 1j * x[6+9+bus]  # Given by solver
+        x_sub = x[2*i:2*i+2]
+        xdot_sub = xdot[2*i:2*i+2]
+        resid = mach.residual(t, x_sub, xdot_sub, vt_given)
+
+        result[2*i:2*i+2] = resid[:]
+
+
 def main():
 
     net = get_net()
@@ -224,40 +258,9 @@ def main():
 
     ybus_states = [(1.0, ybus_2), (1.083, ybus_3)]
 
-    residual_counter = 0
-
     # Define function here so it has access to outer scope variables.
-    def residual(t, x, xdot, result):
-        """ Aggregate machine residual functions. """
-
-        nonlocal residual_counter
-        residual_counter += 1
-        print(residual_counter)
-        print(f't={t}')
-
-        # Calculate bus voltages.
-        currents = np.zeros(ybus_og.shape[0], dtype=ybus_og.dtype)
-        for i, mach in enumerate(machs):  # Assume ordered dict.
-            x_sub = x[2*i:2*i+2]
-            xdot_sub = xdot[2*i:2*i+2]
-            mach_i = mach.get_i(t, x_sub, xdot_sub)
-            bus = mach.params['bus']
-            currents[bus] += mach_i
-
-        ybus_inv = get_ybus_inv(t, ybus_og, ybus_states)
-        v_calc = np.squeeze(ybus_inv @ currents)
-        result[6:6+9] = v_calc.real - x[6:6+9]
-        result[6+9:] = v_calc.imag - x[6+9:]
-
-        # Now, get residuals
-        for i, mach in enumerate(machs):  # Assume ordered dict.
-            bus = mach.params['bus']
-            vt_given = x[6+bus] + 1j * x[6+9+bus]  # Given by solver
-            x_sub = x[2*i:2*i+2]
-            xdot_sub = xdot[2*i:2*i+2]
-            resid = mach.residual(t, x_sub, xdot_sub, vt_given)
-
-            result[2*i:2*i+2] = resid[:]
+    def residual_wrapper(t, x, xdot, result):
+        return residual(t, x, xdot, result, machs, ybus_og, ybus_states)
 
     init_x = np.concatenate([mach.init_state_vector for mach in machs])
     init_x = np.concatenate([init_x,
@@ -266,12 +269,12 @@ def main():
     init_xdot = np.zeros_like(init_x)
 
     a = np.zeros_like(init_x)
-    residual(0, init_x, init_xdot, a)
+    residual_wrapper(0, init_x, init_xdot, a)
     print(a, '\n', np.sum(np.abs(a)))  # should be about zero.
 
     solver = dae(
         'ida',
-        residual,
+        residual_wrapper,
         # compute_initcond='yp0',
         first_step_size=1e-18,
         atol=1e-6,
