@@ -159,10 +159,10 @@ class Machine:
 
         deltadot_calc = 2 * np.pi * self.params['fn'] * (omega - 1)
 
-        resid = np.abs(np.array([
+        resid = np.array([
             omegadot_calc - omegadot,  # omega
             deltadot_calc - deltadot,  # delta
-        ]))
+        ])
 
         return resid
 
