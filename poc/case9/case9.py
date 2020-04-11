@@ -205,7 +205,7 @@ def residual(t, x, xdot, result, machs, ybus_og, ybus_states):
     # Now, get residuals
     for i, mach in enumerate(machs):  # Assume ordered dict.
         bus = mach.params['bus']
-        vt_given = x[6+bus] + 1j * x[6+9+bus]  # Given by solver
+        vt_given = np.complex(x[6+bus], x[6+9+bus])  # Given by solver
         x_sub = x[2*i:2*i+2]
         xdot_sub = xdot[2*i:2*i+2]
         resid = mach.residual(t, x_sub, xdot_sub, vt_given)
