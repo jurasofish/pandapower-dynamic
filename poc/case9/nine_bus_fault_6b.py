@@ -1,4 +1,4 @@
-""" A rigid reimplementation of pypower dynamics' nine bus example. """
+""" A rigid reimplementation of pypower dynamics' nine bus fault with 6th order machines. """
 import numpy as np
 import pandapower as pp
 import pandapower.networks as nw
