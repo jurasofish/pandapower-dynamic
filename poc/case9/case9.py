@@ -6,8 +6,12 @@ from itertools import chain
 import pandas as pd
 from scikits.odes.dae import dae
 import matplotlib.pyplot as plt
+from cachetools import cached, LRUCache
+from cachetools.keys import hashkey
+import time
 
 
+residual_counter = 0
 pd.set_option('display.max_columns', 500)
 pd.set_option('display.width', 1000)
 
@@ -135,37 +139,79 @@ class Machine:
         self.init_state_vector = np.array([
             omega0,  # differential
             delta0,  # differential
-            vt0.real,  # algebraic
-            vt0.imag,  # algebraic
         ])
 
-    def get_i(self, t, x, xdot):
+    def get_i(self, t, x):
         """ x is the same x as used in the DAE residual function. """
         delta = x[1]
         i_grid = self.params['eq'] * np.exp(1j * delta) / np.complex(0, self.params['xdp'])
         return i_grid
 
-    def residual(self, t, x, xdot, vt_calc):
+    def calc_diff(self, t, x, vt):
         omega = x[0]
-        omegadot = xdot[0]
         delta = x[1]
-        deltadot = xdot[1]
-        vt = x[2] + 1j*x[3]
 
         p = np.abs(vt) * self.params['eq'] * np.sin(delta - np.angle(vt)) / self.params['xdp']
 
-        omegadot_calc = 1/(2*self.params['h']) * (self.params['pm'] - p)
+        omegadot_calc = 1/(2*self.params['h']) * (self.params['pm']/omega - p)
 
         deltadot_calc = 2 * np.pi * self.params['fn'] * (omega - 1)
 
-        resid = np.abs(np.array([
-            omegadot_calc - omegadot,  # omega
-            deltadot_calc - deltadot,  # delta
-            vt_calc.real - vt.real,  # v real
-            vt_calc.imag - vt.imag,  # v imag
-        ]))
+        diff = np.array([
+            omegadot_calc,
+            deltadot_calc,
+        ])
 
-        return resid
+        return diff
+
+
+# https://stackoverflow.com/a/32655449/8899565
+@cached(cache=LRUCache(maxsize=128), key=lambda t, *args, **kwargs: hashkey(t))
+def get_ybus_inv(t, ybus_og, ybus_states, d=1e-5):
+    ybus = ybus_og
+    for event_t, event_ybus in ybus_states:
+        factor = 1 / (1 + np.exp(np.clip(-(t - event_t) / d, -50, 50)))
+        ybus = ybus + factor * event_ybus  # don't use in-place += as it mutates.
+
+    ybus_inv = np.linalg.inv(ybus)
+    return ybus_inv
+
+
+# @profile
+def residual(t, x, xdot, result, machs, ybus_og, ybus_states):
+    """ Aggregate machine residual functions. """
+    t1 = time.perf_counter()
+
+    global residual_counter
+    residual_counter += 1
+    # print(residual_counter)
+    print(f't={t}')
+
+    # Calculate bus voltages.
+    currents = np.zeros(ybus_og.shape[0], dtype=ybus_og.dtype)
+    for i, mach in enumerate(machs):  # Assume ordered dict.
+        x_sub = x[2*i:2*i+2]
+        mach_i = mach.get_i(t, x_sub)
+        bus = mach.params['bus']
+        currents[bus] += mach_i
+
+    t_inv = time.perf_counter()
+    ybus_inv = get_ybus_inv(t, ybus_og, ybus_states)
+    # print(f'Inverse in {(time.perf_counter() - t_inv) * 1e6:.2f} us')
+    v_calc = np.squeeze(ybus_inv @ currents)
+    result[6:6+9] = v_calc.real - x[6:6+9]
+    result[6+9:] = v_calc.imag - x[6+9:]
+
+    # Now, get residuals
+    for i, mach in enumerate(machs):  # Assume ordered dict.
+        bus = mach.params['bus']
+        vt_given = np.complex(x[6+bus], x[6+9+bus])  # Given by solver
+        x_sub = x[2*i:2*i+2]
+        xdot_sub = xdot[2*i:2*i+2]
+        diff_values = mach.calc_diff(t, x_sub, vt_given)
+
+        result[2*i:2*i+2] = (diff_values - xdot_sub).copy()[:]
+    # print(f'Residual in {(time.perf_counter() - t1)*1e6:.2f} us')
 
 
 def main():
@@ -175,8 +221,8 @@ def main():
     check_unsupported(net)
 
     pp.runpp(net)
-    ybus = np.array(net._ppc["internal"]["Ybus"].todense())
-    ybus += get_load_admittances(np.zeros_like(ybus), net)
+    ybus_og = np.array(net._ppc["internal"]["Ybus"].todense())
+    ybus_og += get_load_admittances(np.zeros_like(ybus_og), net)
 
     opt = {'t_sim': 2.0, 'fn': 60}
     # Map from pp_bus to machine.
@@ -205,66 +251,45 @@ def main():
     # Need to properly understand current injection equations.
     for mach in machs:
         bus = mach.params['bus']
-        ybus[bus, bus] += 1/(1j * mach.params['xdp'])
-    ybus_inv = np.linalg.inv(ybus)
+        ybus_og[bus, bus] += 1/(1j * mach.params['xdp'])
+
+    ybus_1 = ybus_og.copy()
+
+    ybus_2 = np.zeros_like(ybus_og)
+    ybus_2[7, 7] += 1e4 - 1j * 1e4
+
+    ybus_3 = ybus_2 * -1
+
+    ybus_states = [(1.0, ybus_2), (1.083, ybus_3)]
 
     resid_t = []
     resid_vals = []
 
     # Define function here so it has access to outer scope variables.
-    def residual(t, x, xdot, result):
-        """ Aggregate machine residual functions. """
+    def residual_wrapper(t, x, xdot, result):
+        return residual(t, x, xdot, result, machs, ybus_og, ybus_states)
 
-        # Calculate bus voltages.
-        currents = np.zeros(ybus.shape[0], dtype=ybus.dtype)
-        for i, mach in enumerate(machs):  # Assume ordered dict.
-            x_sub = x[4*i:4*i+4]
-            xdot_sub = xdot[4*i:4*i+4]
-            mach_i = mach.get_i(t, x_sub, xdot_sub)
-            bus = mach.params['bus']
-            currents[bus] += mach_i
-        v_calc = np.squeeze(ybus_inv @ currents)
-        _ = net  # Grab reference to net from outer scope to assist debugging.
-        # print(abs(np.squeeze(np.array(net._ppc["internal"]["V"])) - v_calc).max())
-        # print()
-
-        # Now, get residuals
-        for i, mach in enumerate(machs):  # Assume ordered dict.
-            bus = mach.params['bus']
-            vt_calc = v_calc[bus]
-            x_sub = x[4*i:4*i+4]
-            xdot_sub = xdot[4*i:4*i+4]
-            resid = mach.residual(t, x_sub, xdot_sub, vt_calc)
-
-            result[4*i:4*i+4] = resid[:]
-
-        abs_resid = np.sum(np.abs(result))
-        if t > 1e-3:
-            resid_t.append(t)
-            resid_vals.append(abs_resid)
-
-        if abs(t - 0.32728) < 1e-3:
-            print(result)
-            print(abs_resid)
-
-    init_x = np.abs(np.concatenate([mach.init_state_vector for mach in machs]))
+    init_x = np.concatenate([mach.init_state_vector for mach in machs])
+    init_x = np.concatenate([init_x,
+                             np.squeeze(np.array(net._ppc["internal"]["V"])).real,
+                             np.squeeze(np.array(net._ppc["internal"]["V"])).imag])
     init_xdot = np.zeros_like(init_x)
 
     a = np.zeros_like(init_x)
-    residual(0, init_x, init_xdot, a)
+    residual_wrapper(0, init_x, init_xdot, a)
     print(a, '\n', np.sum(np.abs(a)))  # should be about zero.
 
     solver = dae(
         'ida',
-        residual,
+        residual_wrapper,
         # compute_initcond='yp0',
         first_step_size=1e-18,
-        atol=1e-4,
-        rtol=1e-4,
-        algebraic_vars_idx=[2, 3, 6, 7, 10, 11],
+        atol=1e-6,
+        rtol=1e-6,
+        algebraic_vars_idx=list(range(6, 6+9*2)),
         old_api=False,
-        max_steps=5000,
-        max_step_size=0.1,
+        max_steps=500000,
+        max_step_size=1e-3,
     )
 
     solution = solver.solve(
@@ -273,12 +298,12 @@ def main():
         init_xdot
     )
 
-    # gen1_vt = abs(solution.values.y[:, 2] + 1j * solution.values.y[:, 3])
-    # gen2_vt = abs(solution.values.y[:, 6] + 1j * solution.values.y[:, 7])
-    gen3_vt = abs(solution.values.y[:, 10] + 1j * solution.values.y[:, 11])
+    gen1_vt = abs(solution.values.y[:, 6+0] + 1j * solution.values.y[:, 6+9+0])
+    gen2_vt = abs(solution.values.y[:, 6+1] + 1j * solution.values.y[:, 6+9+1])
+    gen3_vt = abs(solution.values.y[:, 6+2] + 1j * solution.values.y[:, 6+9+2])
     # plt.plot(solution.values.t[-30:], gen1_vt[-30:])
-    # plt.plot(solution.values.t, gen1_vt)
-    # plt.plot(solution.values.t, gen2_vt)
+    plt.plot(solution.values.t, gen1_vt)
+    plt.plot(solution.values.t, gen2_vt)
     plt.plot(solution.values.t, gen3_vt)
 
     plt.figure()
@@ -286,9 +311,6 @@ def main():
 
     plt.figure()
     plt.plot(solution.values.t, solution.values.y[:, 1])
-
-    plt.figure()
-    plt.scatter(resid_t, resid_vals)
 
     plt.show()
 

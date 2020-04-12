@@ -4,6 +4,7 @@ import numpy as np
 import pandapower as pp
 import pandapower.networks as nw
 from itertools import chain
+import time
 
 
 def rad(theta):
@@ -91,10 +92,22 @@ def main():
     i = np.zeros(ybus.shape[0], dtype=ybus.dtype)
     i += get_i(np.zeros_like(i), net)
 
+    t1 = time.perf_counter()
     calculated_v = np.squeeze(np.linalg.inv(ybus) @ i)
+    t_inv = time.perf_counter() - t1
+
+    t1 = time.perf_counter()
+    calculated_v_solved = np.squeeze(np.linalg.solve(ybus, i))
+    t_solve = time.perf_counter() - t1
 
     print("Is calculated V same as load flow solved V?",
-          np.allclose(v, calculated_v))
+          np.allclose(v, calculated_v), f'in {t_inv} seconds, and with'
+                                        f' a different of ',
+          np.sum(np.abs(v - calculated_v)))
+    print("Is calculated V by solve same as load flow solved V?",
+          np.allclose(v, calculated_v_solved), f'in {t_solve} seconds'
+                                               f' a different of ',
+          np.sum(np.abs(v - calculated_v_solved)))
 
 
 if __name__ == '__main__':
