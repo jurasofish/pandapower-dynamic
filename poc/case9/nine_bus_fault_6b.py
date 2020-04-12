@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from cachetools import cached, LRUCache
 from cachetools.keys import hashkey
 import time
+import munch
 
 
 residual_counter = 0
@@ -106,68 +107,180 @@ def get_net():
 
 class Machine:
 
-    def __init__(self, pp_bus, bus, fn, vt0, s0, xdp, h):
+    def __init__(self, vt0, s0, p):
 
-        self.params = {
-            'pp_bus': pp_bus,  # Index into pandapower bus dataframe.
-            'bus': bus,  # Index into ybus matrix and v index.
-            'fn': fn,  # Synchronous frequency (Hz).
-            'xdp': xdp,
-            'h': h,
-            'pm': None,
-            'eq': None,
-        }
-        self.signals = {
-            'vt': [],
-            'delta': [],
-            'omega': [],
-            'p': [],
-        }
+        p = munch.munchify(p)
+        self.params = p
+
+        # internal variables
+        p.gamma_d1 = (p.xdpp - p.xa) / (p.xdp - p.xa)
+        p.gamma_d2 = (1 - p.gamma_d1) / (p.xdp - p.xa)
+        p.gamma_q1 = (p.xqpp - p.xa) / (p.xqp - p.xa)
+        p.gamma_q2 = (1 - p.gamma_q1) / (p.xqp - p.xa)
 
         ia0 = np.conj(s0/vt0)
-        theta0 = np.angle(vt0)
-        eq0 = vt0 + np.complex(0, self.params['xdp']) * ia0
+
+        eq0 = vt0 + np.complex(p.ra, p.xq) * ia0
         delta0 = np.angle(eq0)
+        psi0 = np.angle(ia0)   # inconsistent with wiki.openelectrical
+
+        # convert currents to rotor reference frame
+        id0 = np.abs(ia0) * np.sin(delta0 - psi0)
+        iq0 = np.abs(ia0) * np.cos(delta0 - psi0)
+
+        vd0 = np.abs(vt0) * np.sin(delta0 - np.angle(vt0))
+        vq0 = np.abs(vt0) * np.cos(delta0 - np.angle(vt0))
+
+        edp0 = vd0 - p.xqpp * iq0 + p.ra * id0 - (1 - p.gamma_q1) * (p.xqp - p.xa) * iq0
+        eqp0 = vq0 + p.xdpp * id0 + p.ra * iq0 + (1 - p.gamma_d1) * (p.xdp - p.xa) * id0
+        psid_pp0 = eqp0 - (p.xdp - p.xa) * id0
+        psiq_pp0 = -edp0 - (p.xqp - p.xa) * iq0
+        vfd0 = (
+            eqp0 + (p.xd - p.xdp)
+            * (id0 - p.gamma_d2 * psid_pp0
+               - (1 - p.gamma_d1) * id0 + p.gamma_d2 * eqp0)
+        )
+
+        # calculate active and reactive power
+        # somewhat inconsistent with openelectrical.
+        p0 = vd0 * id0 + vq0 * iq0
+        q0 = vq0 * id0 - vd0 * iq0
+
         omega0 = 1
 
         # Mechanical power.
-        self.params['pm'] = (1 / self.params['xdp']) \
-            * np.abs(vt0) * np.abs(eq0) * np.sin(delta0 - theta0)
+        self.params['pm'] = p0
+        self.params['vfd'] = vfd0
+        self.params['id'] = id0
+        self.params['iq'] = iq0
 
-        self.params['eq'] = np.abs(eq0)
+        self.yg = (p.ra - 1j * 0.5 * (p.xdpp + p.xqpp)) / (p.ra ** 2 + (p.xdpp * p.xqpp))
 
         self.init_state_vector = np.array([
-            omega0,  # differential
-            delta0,  # differential
+            omega0,
+            delta0,
+            eqp0.real,
+            eqp0.imag,
+            psiq_pp0.real,
+            psiq_pp0.imag,
+            edp0.real,
+            edp0.imag,
+            psid_pp0.real,
+            psid_pp0.imag,
         ])
 
-    def get_i(self, t, x):
+    def get_i(self, t, x, vt):
         """ x is the same x as used in the DAE residual function. """
+        omega = x[0]
         delta = x[1]
-        i_grid = self.params['eq'] * np.exp(1j * delta) / np.complex(0, self.params['xdp'])
-        return i_grid
+        eqp = np.complex(x[2], x[3])
+        psiq_pp = np.complex(x[4], x[5])
+        edp = np.complex(x[6], x[7])
+        psid_pp = np.complex(x[8], x[9])
+
+        p = self.params
+
+        vd = np.abs(vt) * np.sin(delta - np.angle(vt))
+        vq = np.abs(vt) * np.cos(delta - np.angle(vt))
+
+        # ``id`` is a built-in function.
+        id_ = (  # sorry
+            (
+                -vq / omega + p.gamma_d1 * eqp
+                + (1 - p.gamma_d1) * psid_pp
+                - p.ra / (omega * p.xqpp) * (
+                    vd - p.gamma_q1 * edp
+                    + (1 - p.gamma_q1) * psiq_pp
+                )
+             )
+            / (p.xdpp + p.ra ** 2 / (omega * omega * p.xqpp))
+        )
+        iq = (
+                (vd / omega + (p.ra * id_ / omega)
+                 - p.gamma_q1 * edp + (1 - p.gamma_q1) * psiq_pp) / p.xqpp
+        )
+
+        # calculate machine current injection (norton equivalent current injection in network frame)
+        in_ = (iq - 1j * id_) * np.exp(1j * delta)
+        im = in_ + self.yg * vt
+
+        return im
 
     def calc_diff(self, t, x, vt):
         omega = x[0]
         delta = x[1]
+        eqp = np.complex(x[2], x[3])
+        psiq_pp = np.complex(x[4], x[5])
+        edp = np.complex(x[6], x[7])
+        psid_pp = np.complex(x[8], x[9])
 
-        p = np.abs(vt) * self.params['eq'] * np.sin(delta - np.angle(vt)) / self.params['xdp']
+        p = self.params
 
-        omegadot_calc = 1/(2*self.params['h']) * (self.params['pm']/omega - p)
+        # Calculate terminal voltage in dq reference frame
+        vd = np.abs(vt) * np.sin(delta - np.angle(vt))
+        vq = np.abs(vt) * np.cos(delta - np.angle(vt))
+        id_ = (  # sorry
+                (
+                        -vq / omega + p.gamma_d1 * eqp
+                        + (1 - p.gamma_d1) * psid_pp
+                        - p.ra / (omega * p.xqpp) * (
+                                vd - p.gamma_q1 * edp
+                                + (1 - p.gamma_q1) * psiq_pp
+                        )
+                )
+                / (p.xdpp + p.ra ** 2 / (omega * omega * p.xqpp))
+        )
+        iq = (
+                (vd / omega + (p.ra * id_ / omega)
+                 - p.gamma_q1 * edp + (1 - p.gamma_q1) * psiq_pp) / p.xqpp
+        )
 
-        deltadot_calc = 2 * np.pi * self.params['fn'] * (omega - 1)
+        deqp = (
+            (p.vfd
+             - (p.xd - p.xdp) * (
+                    id_ - p.gamma_d2 * psid_pp
+                    - (1 - p.gamma_d1) * id_ + p.gamma_d2 * eqp
+             ) - eqp
+             ) / p.td0p
+        )
+
+        dedp = (
+            (p.xq - p.xqp) * (
+                 iq - p.gamma_q2 * psiq_pp
+                 - (1 - p.gamma_q1) * iq - p.gamma_q2 * edp
+            )
+            - edp
+        ) / p.tq0p
+
+        dpsid_pp = (eqp - (p.xdp - p.xa) * id_ - psid_pp) / p.td0pp
+
+        dpsiq_pp = (-edp - (p.xqp - p.xa) * iq - psiq_pp) / p.tq0pp
+
+        pe = (vd + p.ra * id_) * id_ + (vq + p.ra * iq) * iq
+
+        domega = 1/(2*p.h) * (p.pm/omega - pe)
+
+        ddelta = 2 * np.pi * p.fn * (omega - 1)
 
         diff = np.array([
-            omegadot_calc,
-            deltadot_calc,
-        ])
+            domega,
+            ddelta,
+            deqp.real,
+            deqp.imag,
+            dpsiq_pp.real,
+            dpsiq_pp.imag,
+            dedp.real,
+            dedp.imag,
+            dpsid_pp.real,
+            dpsid_pp.imag,
+        ], dtype=np.float64)
 
         return diff
 
 
 # https://stackoverflow.com/a/32655449/8899565
 @cached(cache=LRUCache(maxsize=128), key=lambda t, *args, **kwargs: hashkey(t))
-def get_ybus_inv(t, ybus_og, ybus_states, d=1e-5):
+def get_ybus_inv(t, ybus_og, ybus_states, d=1e-6):
     ybus = ybus_og
     for event_t, event_ybus in ybus_states:
         factor = 1 / (1 + np.exp(np.clip(-(t - event_t) / d, -50, 50)))
@@ -182,6 +295,9 @@ def residual(t, x, xdot, result, machs, ybus_og, ybus_states):
     """ Aggregate machine residual functions. """
     t1 = time.perf_counter()
 
+    # Number of elements in each state vector.
+    k = machs[0].init_state_vector.shape[0]
+
     global residual_counter
     residual_counter += 1
     # print(residual_counter)
@@ -190,27 +306,28 @@ def residual(t, x, xdot, result, machs, ybus_og, ybus_states):
     # Calculate bus voltages.
     currents = np.zeros(ybus_og.shape[0], dtype=ybus_og.dtype)
     for i, mach in enumerate(machs):  # Assume ordered dict.
-        x_sub = x[2*i:2*i+2]
-        mach_i = mach.get_i(t, x_sub)
         bus = mach.params['bus']
+        vt_given = np.complex(x[-18 + bus], x[-18 + 9 + bus])  # Given by solver
+        x_sub = x[k*i:k*i+k]
+        mach_i = mach.get_i(t, x_sub, vt_given)
         currents[bus] += mach_i
 
     t_inv = time.perf_counter()
     ybus_inv = get_ybus_inv(t, ybus_og, ybus_states)
     # print(f'Inverse in {(time.perf_counter() - t_inv) * 1e6:.2f} us')
     v_calc = np.squeeze(ybus_inv @ currents)
-    result[6:6+9] = v_calc.real - x[6:6+9]
-    result[6+9:] = v_calc.imag - x[6+9:]
+    result[-18:-18+9] = v_calc.real - x[-18:-18+9]
+    result[-18+9:] = v_calc.imag - x[-18+9:]
 
     # Now, get residuals
     for i, mach in enumerate(machs):  # Assume ordered dict.
         bus = mach.params['bus']
-        vt_given = np.complex(x[6+bus], x[6+9+bus])  # Given by solver
-        x_sub = x[2*i:2*i+2]
-        xdot_sub = xdot[2*i:2*i+2]
+        vt_given = np.complex(x[-18+bus], x[-18+9+bus])  # Given by solver
+        x_sub = x[k*i:k*i+k]
+        xdot_sub = xdot[k*i:k*i+k]
         diff_values = mach.calc_diff(t, x_sub, vt_given)
 
-        result[2*i:2*i+2] = (diff_values - xdot_sub).copy()[:]
+        result[k*i:k*i+k] = (diff_values - xdot_sub).copy()[:]
     # print(f'Residual in {(time.perf_counter() - t1)*1e6:.2f} us')
 
 
@@ -224,40 +341,50 @@ def main():
     ybus_og = np.array(net._ppc["internal"]["Ybus"].todense())
     ybus_og += get_load_admittances(np.zeros_like(ybus_og), net)
 
-    opt = {'t_sim': 2.0, 'fn': 60}
+    opt = {'t_sim': 5.0, 'fn': 60}
     # Map from pp_bus to machine.
     all_mach_params = {
-        1: {'xdp': 0.0608, 'h': 23.64},
-        2: {'xdp': 0.1198, 'h': 6.01},
-        3: {'xdp': 0.1813, 'h': 3.01},
+        1: {
+            'ra': 0.01, 'xa': 0.0, 'xd': 0.36, 'xq': 0.23, 'xdp': 0.15,
+            'xqp': 0.15, 'xdpp': 0.1, 'xqpp': 0.1, 'td0p': 8.952,
+            'tq0p': 5.76, 'td0pp': 0.075, 'tq0pp': 0.075, 'h': 8
+        },
+        2: {
+            'ra': 0.0, 'xa': 0.0, 'xd': 1.72, 'xq': 1.66, 'xdp': 0.378,
+            'xqp': 0.378, 'xdpp': 0.2, 'xqpp': 0.2, 'td0p': 5.982609,
+            'tq0p': 4.5269841, 'td0pp': 0.0575, 'tq0pp': 0.0575, 'h': 4
+        },
+        3: {
+            'ra': 0.0, 'xa': 0.0, 'xd': 1.68, 'xq': 1.61, 'xdp': 0.32,
+            'xqp': 0.32, 'xdpp': 0.2, 'xqpp': 0.2, 'td0p': 5.5,
+            'tq0p': 4.60375, 'td0pp': 0.0575, 'tq0pp': 0.0575, 'h': 2
+        },
     }
 
-    machs = [
-        Machine(
-            pp_bus=pp_bus,
-            bus=net._pd2ppc_lookups["bus"][pp_bus],
-            fn=opt['fn'],
-            vt0=get_v_at_bus(net, pp_bus),
-            s0=get_gen_s_at_bus(net, pp_bus),
-            xdp=mach_params['xdp'],
-            h=mach_params['h'],
-        )
-        for pp_bus, mach_params in all_mach_params.items()
-    ]
+    machs = []
+    for pp_bus, mach_params in all_mach_params.items():
+
+        mach_params = {
+            **mach_params,
+            'pp_bus': pp_bus,
+            'bus': net._pd2ppc_lookups["bus"][pp_bus],
+            'fn': opt['fn'],
+        }
+
+        vt0 = get_v_at_bus(net, pp_bus)
+        s0 = get_gen_s_at_bus(net, pp_bus)
+        mach = Machine(vt0, s0, mach_params)
+        machs.append(mach)
 
     # Need to properly understand current injection equations.
     for mach in machs:
         bus = mach.params['bus']
-        ybus_og[bus, bus] += 1/(1j * mach.params['xdp'])
-
-    ybus_1 = ybus_og.copy()
+        ybus_og[bus, bus] += mach.yg
 
     ybus_2 = np.zeros_like(ybus_og)
-    ybus_2[7, 7] += 1e4 - 1j * 1e4
-
+    ybus_2[6, 6] += 1e4 - 1j * 1e4
     ybus_3 = ybus_2 * -1
-
-    ybus_states = [(1.0, ybus_2), (1.083, ybus_3)]
+    ybus_states = [(1.0, ybus_2), (1.1, ybus_3)]
 
     # Define function here so it has access to outer scope variables.
     def residual_wrapper(t, x, xdot, result):
@@ -287,24 +414,30 @@ def main():
     )
 
     solution = solver.solve(
-        np.linspace(0, 2, 1000),
+        np.linspace(0, 5, 5000),
         init_x,
         init_xdot
     )
 
-    gen1_vt = abs(solution.values.y[:, 6+0] + 1j * solution.values.y[:, 6+9+0])
-    gen2_vt = abs(solution.values.y[:, 6+1] + 1j * solution.values.y[:, 6+9+1])
-    gen3_vt = abs(solution.values.y[:, 6+2] + 1j * solution.values.y[:, 6+9+2])
-    # plt.plot(solution.values.t[-30:], gen1_vt[-30:])
-    plt.plot(solution.values.t, gen1_vt)
-    plt.plot(solution.values.t, gen2_vt)
-    plt.plot(solution.values.t, gen3_vt)
+    gen1_vt = solution.values.y[:, -18+0] + 1j * solution.values.y[:, -18+9+0]
+    gen1_delta = solution.values.y[:, 1]
+
+    gen1_vd = np.abs(gen1_vt) * np.sin(gen1_delta - np.angle(gen1_vt))
+    gen1_vq = np.abs(gen1_vt) * np.cos(gen1_delta - np.angle(gen1_vt))
+
+    # Data saved from pypower dynamics.
+    # Data saved from pypower dynamics.
+    df = pd.read_csv('./pypower_dynamic_output.csv')
+
+    print()
 
     plt.figure()
-    plt.plot(solution.values.t, solution.values.y[:, 0])
+    plt.plot(df['time'], df['GEN1:Vd'], '-', label='GEN1:Vd pydyn')
+    plt.plot(solution.values.t, gen1_vd, '-.', label='Gen1 Vd')
 
-    plt.figure()
-    plt.plot(solution.values.t, solution.values.y[:, 1])
+    plt.plot(df['time'], df['GEN1:Vq'], '-', label='GEN1:Vq pydyn')
+    plt.plot(solution.values.t, gen1_vq, '-.', label='Gen1 Vq')
+    plt.legend()
 
     plt.show()
 
