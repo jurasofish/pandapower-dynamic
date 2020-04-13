@@ -458,36 +458,27 @@ def main():
     )
 
     solution = solver.solve(
-        np.linspace(0, 5, 5000),
+        np.linspace(0, 8, 5000),
         init_x,
         init_xdot
     )
 
-    gen1_vt = solution.values.y[:, -4+0] + 1j * solution.values.y[:, -4+2+0]
-    gen1_delta = solution.values.y[:, 1]
+    # The "Grid"
+    grid_vt = solution.values.y[:, -4+0] + 1j * solution.values.y[:, -4+2+0]
+    grid_delta = solution.values.y[:, 1]
 
-    gen2_vt = solution.values.y[:, -4+1] + 1j * solution.values.y[:, -4+2+1]
+    # The machine we're interested in.
+    gen1_vt = solution.values.y[:, -4+1] + 1j * solution.values.y[:, -4+2+1]
 
-    plt.plot(solution.values.t, gen1_vt)
-    plt.plot(solution.values.t, gen2_vt)
-    plt.show()
-
-    '''
     # Data saved from pypower dynamics.
-    df = pd.read_csv('./pypower_dynamic_output.csv')
-
-    print()
+    df = pd.read_csv('./smib_fault_no_avr_pydn.csv')
 
     plt.figure()
-    plt.plot(df['time'], df['GEN1:Vd'], '-', label='GEN1:Vd pydyn')
-    plt.plot(solution.values.t, gen1_vd, '-.', label='Gen1 Vd')
-
-    plt.plot(df['time'], df['GEN1:Vq'], '-', label='GEN1:Vq pydyn')
-    plt.plot(solution.values.t, gen1_vq, '-.', label='Gen1 Vq')
+    plt.plot(df['time'], df['GEN1:Vt'], '-', label='GEN1:Vt pydyn')
+    plt.plot(solution.values.t, gen1_vt, '-.', label='Gen2 Vt')
     plt.legend()
 
     plt.show()
-    '''
 
 
 if __name__ == '__main__':
