@@ -83,29 +83,70 @@ def check_unsupported(net):
 
 
 def get_net():
-    """ Get a pp network consistent with pypower dynamic nine bus case. """
-    net = nw.case9()
-
-    # Make consistent with the case in pypower dynamics.
-    net.sn_mva = 100.0
-    net.gen.vm_pu = 1.025
-    net.ext_grid.vm_pu = 1.04
-    pp.create_continuous_bus_index(net, 1)
-    pp.reindex_buses(net, {
-        5: 6,
-        6: 9,
-        7: 8,
-        8: 7,
-        9: 5,
-    })
-    net.bus = net.bus.sort_index()
-    net.load = net.load.sort_values('bus').reset_index(drop=True)
-    net.line = net.line.sort_values('from_bus').reset_index(drop=True)
+    """ Get a pp network consistent with pypower dynamic two bus case. """
+    net = pp.create_empty_network(sn_mva=100)
+    pp.create_bus(net, vn_kv=345, index=1)
+    pp.create_bus(net, vn_kv=345, index=2)
+    pp.create_sgen(net, 2, 12, 5)  # TODO: pull request to pp to make default q a float.
+    pp.create_ext_grid(net, 1)
+    zn = 345**2/net.sn_mva
+    pp.create_line_from_parameters(net, 1, 2, 1, 0.01*zn, 0.0576*zn, 0, 1e6)
+    pp.create_line_from_parameters(net, 1, 2, 1, 0.01*zn, 0.085*zn, 0, 1e6)
 
     return net
 
 
-class Machine:
+class ExtGrid:
+
+    # def __init__(self, pp_bus, bus, fn, vt0, s0, xdp, h):
+    def __init__(self, vt0, s0, p):
+
+        p = munch.munchify(p)
+        self.params = p
+
+        ia0 = np.conj(s0/vt0)
+        theta0 = np.angle(vt0)
+        eq0 = vt0 + np.complex(0, p.xdp) * ia0
+        delta0 = np.angle(eq0)
+        omega0 = 1
+
+        # Mechanical power.
+        p.pm = (1 / p.xdp) * np.abs(vt0) * np.abs(eq0) * np.sin(delta0 - theta0)
+
+        p.eq = np.abs(eq0)
+
+        self.yg = 1 / (1j * p.xdp)
+
+        self.init_state_vector = np.array([
+            omega0,  # differential
+            delta0,  # differential
+        ])
+
+    def get_i(self, t, x, vt):
+        """ x is the same x as used in the DAE residual function. """
+        delta = x[1]
+        i_grid = self.params['eq'] * np.exp(1j * delta) / np.complex(0, self.params['xdp'])
+        return i_grid
+
+    def calc_diff(self, t, x, vt):
+        omega = x[0]
+        delta = x[1]
+
+        p = np.abs(vt) * self.params['eq'] * np.sin(delta - np.angle(vt)) / self.params['xdp']
+
+        omegadot_calc = 1/(2*self.params['h']) * (self.params['pm']/omega - p)
+
+        deltadot_calc = 2 * np.pi * self.params['fn'] * (omega - 1)
+
+        diff = np.array([
+            omegadot_calc,
+            deltadot_calc,
+        ])
+
+        return diff
+
+
+class SauerPaiOrderSix:
 
     def __init__(self, vt0, s0, p):
 
@@ -295,9 +336,6 @@ def residual(t, x, xdot, result, machs, ybus_og, ybus_states):
     """ Aggregate machine residual functions. """
     t1 = time.perf_counter()
 
-    # Number of elements in each state vector.
-    k = machs[0].init_state_vector.shape[0]
-
     global residual_counter
     residual_counter += 1
     # print(residual_counter)
@@ -305,29 +343,36 @@ def residual(t, x, xdot, result, machs, ybus_og, ybus_states):
 
     # Calculate bus voltages.
     currents = np.zeros(ybus_og.shape[0], dtype=ybus_og.dtype)
+    base = 0  # Starting point for a machine's state vector within ultimate vector.
     for i, mach in enumerate(machs):  # Assume ordered dict.
+        k = mach.init_state_vector.shape[0]
         bus = mach.params['bus']
-        vt_given = np.complex(x[-18 + bus], x[-18 + 9 + bus])  # Given by solver
-        x_sub = x[k*i:k*i+k]
+        vt_given = np.complex(x[-4 + bus], x[-4+2 + bus])  # Given by solver
+        x_sub = x[base:base+k]
         mach_i = mach.get_i(t, x_sub, vt_given)
         currents[bus] += mach_i
+        base += k
 
     t_inv = time.perf_counter()
     ybus_inv = get_ybus_inv(t, ybus_og, ybus_states)
     # print(f'Inverse in {(time.perf_counter() - t_inv) * 1e6:.2f} us')
     v_calc = np.squeeze(ybus_inv @ currents)
-    result[-18:-18+9] = v_calc.real - x[-18:-18+9]
-    result[-18+9:] = v_calc.imag - x[-18+9:]
+    result[-4:-4+2] = v_calc.real - x[-4:-4+2]
+    result[-4+2:] = v_calc.imag - x[-4+2:]
 
     # Now, get residuals
+    base = 0  # Starting point for a machine's state vector within ultimate vector.
     for i, mach in enumerate(machs):  # Assume ordered dict.
+        k = mach.init_state_vector.shape[0]
         bus = mach.params['bus']
-        vt_given = np.complex(x[-18+bus], x[-18+9+bus])  # Given by solver
-        x_sub = x[k*i:k*i+k]
-        xdot_sub = xdot[k*i:k*i+k]
+        vt_given = np.complex(x[-4 + bus], x[-4+2 + bus])  # Given by solver
+        x_sub = x[base:base+k]
+        xdot_sub = xdot[base:base+k]
         diff_values = mach.calc_diff(t, x_sub, vt_given)
 
-        result[k*i:k*i+k] = (diff_values - xdot_sub).copy()[:]
+        result[base:base+k] = (diff_values - xdot_sub).copy()[:]
+
+        base += k
     # print(f'Residual in {(time.perf_counter() - t1)*1e6:.2f} us')
 
 
@@ -345,19 +390,14 @@ def main():
     # Map from pp_bus to machine.
     all_mach_params = {
         1: {
-            'ra': 0.01, 'xa': 0.0, 'xd': 0.36, 'xq': 0.23, 'xdp': 0.15,
-            'xqp': 0.15, 'xdpp': 0.1, 'xqpp': 0.1, 'td0p': 8.952,
-            'tq0p': 5.76, 'td0pp': 0.075, 'tq0pp': 0.075, 'h': 8
+            'mach_type': 'ext_grid',
+            'ra': 0, 'xdp': 0.1, 'h': 99999
         },
         2: {
+            'mach_type': 'sauer_pai_six',
             'ra': 0.0, 'xa': 0.0, 'xd': 1.72, 'xq': 1.66, 'xdp': 0.378,
             'xqp': 0.378, 'xdpp': 0.2, 'xqpp': 0.2, 'td0p': 5.982609,
             'tq0p': 4.5269841, 'td0pp': 0.0575, 'tq0pp': 0.0575, 'h': 4
-        },
-        3: {
-            'ra': 0.0, 'xa': 0.0, 'xd': 1.68, 'xq': 1.61, 'xdp': 0.32,
-            'xqp': 0.32, 'xdpp': 0.2, 'xqpp': 0.2, 'td0p': 5.5,
-            'tq0p': 4.60375, 'td0pp': 0.0575, 'tq0pp': 0.0575, 'h': 2
         },
     }
 
@@ -373,7 +413,12 @@ def main():
 
         vt0 = get_v_at_bus(net, pp_bus)
         s0 = get_gen_s_at_bus(net, pp_bus)
-        mach = Machine(vt0, s0, mach_params)
+        if mach_params['mach_type'] == 'ext_grid':
+            mach = ExtGrid(vt0, s0, mach_params)
+        elif mach_params['mach_type'] == 'sauer_pai_six':
+            mach = SauerPaiOrderSix(vt0, s0, mach_params)
+        else:
+            raise ValueError(f'Unknown machine type: {mach_params["mach_type"]}')
         machs.append(mach)
 
     # Need to properly understand current injection equations.
@@ -382,9 +427,9 @@ def main():
         ybus_og[bus, bus] += mach.yg
 
     ybus_2 = np.zeros_like(ybus_og)
-    ybus_2[6, 6] += 1e4 - 1j * 1e4
+    ybus_2[0, 0] += 1e4 - 1j * 1e4
     ybus_3 = ybus_2 * -1
-    ybus_states = [(1.0, ybus_2), (1.1, ybus_3)]
+    ybus_states = [(1.0, ybus_2), (1.2, ybus_3)]
 
     # Define function here so it has access to outer scope variables.
     def residual_wrapper(t, x, xdot, result):
@@ -418,13 +463,16 @@ def main():
         init_xdot
     )
 
-    gen1_vt = solution.values.y[:, -18+0] + 1j * solution.values.y[:, -18+9+0]
+    gen1_vt = solution.values.y[:, -4+0] + 1j * solution.values.y[:, -4+2+0]
     gen1_delta = solution.values.y[:, 1]
 
-    gen1_vd = np.abs(gen1_vt) * np.sin(gen1_delta - np.angle(gen1_vt))
-    gen1_vq = np.abs(gen1_vt) * np.cos(gen1_delta - np.angle(gen1_vt))
+    gen2_vt = solution.values.y[:, -4+1] + 1j * solution.values.y[:, -4+2+1]
 
-    # Data saved from pypower dynamics.
+    plt.plot(solution.values.t, gen1_vt)
+    plt.plot(solution.values.t, gen2_vt)
+    plt.show()
+
+    '''
     # Data saved from pypower dynamics.
     df = pd.read_csv('./pypower_dynamic_output.csv')
 
@@ -439,7 +487,29 @@ def main():
     plt.legend()
 
     plt.show()
+    '''
 
 
 if __name__ == '__main__':
     main()
+
+"""
+import pandapower as pp
+#create empty net
+net = pp.create_empty_network()
+
+#create buses
+b1 = pp.create_bus(net, vn_kv=20., name="Bus 1")
+b2 = pp.create_bus(net, vn_kv=0.4, name="Bus 2")
+b3 = pp.create_bus(net, vn_kv=0.4, name="Bus 3")
+
+#create bus elements
+pp.create_ext_grid(net, bus=b1, vm_pu=1.02, name="Grid Connection")
+pp.create_load(net, bus=b3, p_mw=0.1, q_mvar=0.05, name="Load")
+
+#create branch elements
+tid = pp.create_transformer(net, hv_bus=b1, lv_bus=b2, std_type="0.4 MVA 20/0.4 kV", name="Trafo")
+pp.create_line(net, from_bus=b2, to_bus=b3, length_km=0.1, name="Line",std_type="NAYY 4x50 SE")
+
+pp.runpp(net, numba=False)
+"""
