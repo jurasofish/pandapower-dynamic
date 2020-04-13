@@ -1,4 +1,6 @@
-""" A rigid reimplementation of pypower dynamics' nine bus fault with 6th order machines. """
+""" A rigid reimplementation of pypower dynamics' two bus fault with 6th order machine.
+The AVR has been disabled in pypower dynamics for this example.
+"""
 import numpy as np
 import pandapower as pp
 import pandapower.networks as nw
@@ -319,6 +321,116 @@ class SauerPaiOrderSix:
         return diff
 
 
+class AndersonFouadOrderSix:
+
+    def __init__(self, vt0, s0, p):
+
+        p = munch.munchify(p)
+        self.params = p
+
+        ia0 = np.conj(s0/vt0)
+
+        eq0 = vt0 + np.complex(p.ra, p.xq) * ia0
+        delta0 = np.angle(eq0)
+        psi0 = np.angle(ia0)   # inconsistent with wiki.openelectrical
+
+        # convert currents to rotor reference frame
+        id0 = np.abs(ia0) * np.sin(delta0 - psi0)
+        iq0 = np.abs(ia0) * np.cos(delta0 - psi0)
+
+        vfd0 = np.abs(eq0) + (p.xd - p.xq) * id0
+
+        eqp0 = vfd0 - (p.xd - p.xdp) * id0
+        eqpp0 = eqp0 - (p.xdp - p.xdpp) * id0
+
+        edp0 = (p.xq - p.xqp) * iq0
+        edpp0 = edp0 + (p.xqp - p.xqpp) * iq0
+
+        vd0 = edpp0 + p.xqpp * iq0 - p.ra * id0
+        vq0 = eqpp0 - p.xdpp * id0 - p.ra * iq0
+
+        # Calculate active and reactive power
+        p0 = vd0 * id0 + vq0 * iq0
+
+        omega0 = 1
+
+        # Mechanical power.
+        self.params['pm'] = p0
+        self.params['vfd'] = vfd0
+
+        self.yg = (p.ra - 1j * 0.5 * (p.xdpp + p.xqpp)) / (p.ra ** 2 + (p.xdpp * p.xqpp))
+
+        self.init_state_vector = np.array([
+            omega0,
+            delta0,
+            eqp0,
+            eqpp0,
+            edp0,
+            edpp0,
+        ])
+
+    def get_i(self, t, x, vt):
+        """ x is the same x as used in the DAE residual function. """
+        omega = x[0]
+        delta = x[1]
+        eqp = x[2]
+        eqpp = x[3]
+        edp = x[4]
+        edpp = x[5]
+
+        p = self.params
+
+        vd = np.abs(vt) * np.sin(delta - np.angle(vt))
+        vq = np.abs(vt) * np.cos(delta - np.angle(vt))
+
+        id_ = (eqpp - p.ra / (p.xqpp * omega) * (vd - edpp) - vq / omega) / (p.xdpp + p.ra ** 2 / (omega * omega * p.xqpp))
+        iq = (vd / omega + p.ra * id_ / omega - edpp) / p.xqpp
+
+        # calculate machine current injection (norton equivalent current injection in network frame)
+        in_ = (iq - 1j * id_) * np.exp(1j * delta)
+        im = in_ + self.yg * vt
+
+        return im
+
+    def calc_diff(self, t, x, vt):
+        omega = x[0]
+        delta = x[1]
+        eqp = x[2]
+        eqpp = x[3]
+        edp = x[4]
+        edpp = x[5]
+
+        p = self.params
+
+        vd = np.abs(vt) * np.sin(delta - np.angle(vt))
+        vq = np.abs(vt) * np.cos(delta - np.angle(vt))
+
+        id_ = (eqpp - p.ra / (p.xqpp * omega) * (vd - edpp) - vq / omega) / (p.xdpp + p.ra ** 2 / (omega * omega * p.xqpp))
+        iq = (vd / omega + p.ra * id_ / omega - edpp) / p.xqpp
+
+        deqp = (p.vfd - (p.xd - p.xdp) * id_ - eqp) / p.td0p
+        dedp = ((p.xq - p.xqp) * iq - edp) / p.tq0p
+        deqpp = (eqp - (p.xdp - p.xdpp) * id_ - eqpp) / p.td0pp
+        dedpp = (edp + (p.xqp - p.xqpp) * iq - edpp) / p.tq0pp
+
+        pe = (vd + p.ra * id_) * id_ + (vq + p.ra * iq) * iq
+
+        domega = 1/(2*p.h) * (p.pm/omega - pe)
+
+        ddelta = 2 * np.pi * p.fn * (omega - 1)
+
+        diff = np.array([
+            domega,
+            ddelta,
+            deqp,
+            deqpp,
+            dedp,
+            dedpp,
+        ], dtype=np.float64)
+
+        return diff
+
+
 # https://stackoverflow.com/a/32655449/8899565
 @cached(cache=LRUCache(maxsize=128), key=lambda t, *args, **kwargs: hashkey(t))
 def get_ybus_inv(t, ybus_og, ybus_states, d=1e-6):
@@ -394,10 +506,10 @@ def main():
             'ra': 0, 'xdp': 0.1, 'h': 99999
         },
         2: {
-            'mach_type': 'sauer_pai_six',
-            'ra': 0.0, 'xa': 0.0, 'xd': 1.72, 'xq': 1.66, 'xdp': 0.378,
-            'xqp': 0.378, 'xdpp': 0.2, 'xqpp': 0.2, 'td0p': 5.982609,
-            'tq0p': 4.5269841, 'td0pp': 0.0575, 'tq0pp': 0.0575, 'h': 4
+            'mach_type': 'anderson_fouad_six',
+            'ra': 0.0, 'xd': 2.29, 'xq': 2.18, 'xdp':0.25,
+            'xqp': 0.25, 'xdpp':0.18, 'xqpp': 0.18, 'td0p': 13.1979,
+            'tq0p': 3.2423, 'td0pp': 0.0394, 'tq0pp': 0.1157, 'h': 5.8
         },
     }
 
@@ -417,6 +529,8 @@ def main():
             mach = ExtGrid(vt0, s0, mach_params)
         elif mach_params['mach_type'] == 'sauer_pai_six':
             mach = SauerPaiOrderSix(vt0, s0, mach_params)
+        elif mach_params['mach_type'] == 'anderson_fouad_six':
+            mach = AndersonFouadOrderSix(vt0, s0, mach_params)
         else:
             raise ValueError(f'Unknown machine type: {mach_params["mach_type"]}')
         machs.append(mach)
@@ -475,7 +589,7 @@ def main():
 
     plt.figure()
     plt.plot(df['time'], df['GEN1:Vt'], '-', label='GEN1:Vt pydyn')
-    plt.plot(solution.values.t, gen1_vt, '-.', label='Gen2 Vt')
+    plt.plot(solution.values.t, abs(gen1_vt), '-.', label='Gen Bus 2 Vt')
     plt.legend()
 
     plt.show()
