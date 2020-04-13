@@ -427,7 +427,7 @@ def main():
         ybus_og[bus, bus] += mach.yg
 
     ybus_2 = np.zeros_like(ybus_og)
-    ybus_2[0, 0] += 1e4 - 1j * 1e4
+    ybus_2[1, 1] += 1e4 - 1j * 1e4
     ybus_3 = ybus_2 * -1
     ybus_states = [(1.0, ybus_2), (1.2, ybus_3)]
 
